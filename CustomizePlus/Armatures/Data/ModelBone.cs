@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 using CustomizePlus.Core.Data;
 using CustomizePlus.Templates.Data;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Scene;
@@ -165,26 +166,26 @@ public unsafe class ModelBone
     /// <summary>
     /// Gets all model bones with a lineage that contains this one.
     /// </summary>
-    public IEnumerable<ModelBone> GetDescendants(bool includeSelf = false) => includeSelf
-        ? GetDescendants(this)
-        : GetDescendants(null);
-
-    private IEnumerable<ModelBone> GetDescendants(ModelBone? first)
+    public IEnumerable<ModelBone> GetDescendants(bool includeSelf = false)
     {
-        var output = first != null
-            ? new List<ModelBone>() { first }
-            : new List<ModelBone>();
-
-        output.AddRange(ChildBones);
-
-        using (var iter = output.GetEnumerator())
+        var descendants = new List<ModelBone>();
+        if (includeSelf)
+            descendants.Add(this);
+            
+        // First get direct children
+        descendants.AddRange(ChildBones);
+        
+        // Then recursively get all of their children
+        var index = 0;
+        while (index < descendants.Count)
         {
-            while (iter.MoveNext())
-            {
-                output.AddRange(iter.Current.ChildBones);
-                yield return iter.Current;
-            }
+            // Get children of the current bone and add them to the list
+            var children = descendants[index].ChildBones.ToList();
+            descendants.AddRange(children);
+            index++;
         }
+        
+        return descendants;
     }
 
     /// <summary>
@@ -265,6 +266,275 @@ public unsafe class ModelBone
     public void ApplyModelRotation(CharacterBase* cBase) => ApplyTransFunc(cBase, CustomizedTransform.ModifyExistingRotation);
     public void ApplyModelFullTranslation(CharacterBase* cBase) => ApplyTransFunc(cBase, CustomizedTransform.ModifyExistingTranslationWithRotation);
     public void ApplyStraightModelTranslation(CharacterBase* cBase) => ApplyTransFunc(cBase, CustomizedTransform.ModifyExistingTranslation);
+    
+    /// <summary>
+    /// Apply scale transformation to this bone and all bones in its hierarchy
+    /// </summary>
+    public void ApplyHierarchicalModelScale(CharacterBase* cBase)
+    {
+        if (!IsActive || CustomizedTransform == null || cBase == null)
+            return;
+            
+        var scale = CustomizedTransform.HierarchicalScaling;
+        if (scale.X == 1 && scale.Y == 1 && scale.Z == 1)
+            return; // Skip processing if no scaling is applied
+            
+        Plugin.Logger.Debug($"Applying hierarchical scale {scale} to bone {BoneName}");
+        
+        // Get list of all bones in hierarchy in the correct order
+        var allBones = new List<ModelBone>();
+        GatherBoneHierarchy(allBones);
+        
+        Plugin.Logger.Debug($"Found {allBones.Count} bones in hierarchy starting from {BoneName}");
+        
+        // Create a set of bones we've already processed to avoid processing mirror bones twice
+        var processedBones = new HashSet<(int, int)>();
+        
+        // Store original world positions of all bones
+        var worldPositions = new Dictionary<(int, int), Vector3>();
+        
+        // Calculate original world positions first
+        foreach (var bone in allBones)
+        {
+            var modelTransform = bone.GetGameTransform(cBase, PoseType.Model);
+            if (!modelTransform.Equals(Constants.NullTransform))
+            {
+                worldPositions[(bone.PartialSkeletonIndex, bone.BoneIndex)] = 
+                    new Vector3(modelTransform.Translation.X, modelTransform.Translation.Y, modelTransform.Translation.Z);
+            }
+        }
+        
+        // Process each bone in the hierarchy
+        foreach (var bone in allBones)
+        {
+            // Skip if we've already processed this bone (as a mirror)
+            var boneKey = (bone.PartialSkeletonIndex, bone.BoneIndex);
+            if (processedBones.Contains(boneKey)) continue;
+            
+            // Add this bone to processed set
+            processedBones.Add(boneKey);
+            
+            // Process the main bone
+            var modelTransform = bone.GetGameTransform(cBase, PoseType.Model);
+            if (!modelTransform.Equals(Constants.NullTransform))
+            {
+                // Scale the bone itself
+                modelTransform.Scale.X *= scale.X;
+                modelTransform.Scale.Y *= scale.Y;
+                modelTransform.Scale.Z *= scale.Z;
+                
+                // Handle position update for non-root bones
+                if (bone.ParentBone != null)
+                {
+                    var parent = bone.ParentBone;
+                    var parentKey = (parent.PartialSkeletonIndex, parent.BoneIndex);
+                    
+                    if (worldPositions.ContainsKey(boneKey) && worldPositions.ContainsKey(parentKey))
+                    {
+                        // Calculate original offset from parent
+                        var parentOldPos = worldPositions[parentKey];
+                        var childOldPos = worldPositions[boneKey];
+                        var oldOffset = childOldPos - parentOldPos;
+                        
+                        // Scale this offset
+                        var newOffset = new Vector3(
+                            oldOffset.X * scale.X,
+                            oldOffset.Y * scale.Y,
+                            oldOffset.Z * scale.Z
+                        );
+                        
+                        // Get parent's current position
+                        var parentTransform = parent.GetGameTransform(cBase, PoseType.Model);
+                        if (!parentTransform.Equals(Constants.NullTransform))
+                        {
+                            var parentNewPos = new Vector3(
+                                parentTransform.Translation.X,
+                                parentTransform.Translation.Y,
+                                parentTransform.Translation.Z
+                            );
+                            
+                            // Calculate and set new position
+                            var childNewPos = parentNewPos + newOffset;
+                            modelTransform.Translation.X = childNewPos.X;
+                            modelTransform.Translation.Y = childNewPos.Y;
+                            modelTransform.Translation.Z = childNewPos.Z;
+                        }
+                    }
+                }
+                
+                // Apply model transform directly
+                var skelly = cBase->Skeleton;
+                var pSkelly = skelly->PartialSkeletons[bone.PartialSkeletonIndex];
+                var targetPose = pSkelly.GetHavokPose(Constants.TruePoseIndex);
+                if (targetPose != null)
+                {
+                    targetPose->ModelPose.Data[bone.BoneIndex] = modelTransform;
+                    Plugin.Logger.Verbose($"Applied scaling and moved {bone.BoneName}");
+                    
+                    // Update local transform for non-root bones
+                    if (bone.ParentBone != null)
+                    {
+                        var parentModel = bone.ParentBone.GetGameTransform(cBase, PoseType.Model);
+                        var localTransform = bone.GetGameTransform(cBase, PoseType.Local);
+                        if (!localTransform.Equals(Constants.NullTransform) && !parentModel.Equals(Constants.NullTransform))
+                        {
+                            // Calculate local offset from parent's world position
+                            var parentPos = new Vector3(
+                                parentModel.Translation.X,
+                                parentModel.Translation.Y,
+                                parentModel.Translation.Z
+                            );
+                            var bonePos = new Vector3(
+                                modelTransform.Translation.X,
+                                modelTransform.Translation.Y,
+                                modelTransform.Translation.Z
+                            );
+                            var worldOffset = bonePos - parentPos;
+                            
+                            // Update local translation
+                            localTransform.Translation.X = worldOffset.X;
+                            localTransform.Translation.Y = worldOffset.Y;
+                            localTransform.Translation.Z = worldOffset.Z;
+                            
+                            // Apply local transform
+                            targetPose->LocalPose.Data[bone.BoneIndex] = localTransform;
+                        }
+                    }
+                }
+            }
+            
+            // Process the mirror bone if it exists
+            if (bone.TwinBone != null)
+            {
+                var twinBone = bone.TwinBone;
+                var twinKey = (twinBone.PartialSkeletonIndex, twinBone.BoneIndex);
+                
+                // Add twin to processed set
+                processedBones.Add(twinKey);
+                
+                var twinTransform = twinBone.GetGameTransform(cBase, PoseType.Model);
+                if (!twinTransform.Equals(Constants.NullTransform))
+                {
+                    // Scale the twin bone
+                    twinTransform.Scale.X *= scale.X;
+                    twinTransform.Scale.Y *= scale.Y;
+                    twinTransform.Scale.Z *= scale.Z;
+                    
+                    // Handle position update for non-root mirror bones
+                    if (twinBone.ParentBone != null)
+                    {
+                        var twinParent = twinBone.ParentBone;
+                        var twinParentKey = (twinParent.PartialSkeletonIndex, twinParent.BoneIndex);
+                        
+                        if (worldPositions.ContainsKey(twinKey) && worldPositions.ContainsKey(twinParentKey))
+                        {
+                            // Calculate original offset from parent
+                            var twinParentOldPos = worldPositions[twinParentKey];
+                            var twinOldPos = worldPositions[twinKey];
+                            var twinOldOffset = twinOldPos - twinParentOldPos;
+                            
+                            // Scale this offset, mirroring X axis
+                            var twinNewOffset = new Vector3(
+                                twinOldOffset.X * scale.X,
+                                twinOldOffset.Y * scale.Y,
+                                twinOldOffset.Z * scale.Z
+                            );
+                            
+                            // Get parent's current position
+                            var twinParentTransform = twinParent.GetGameTransform(cBase, PoseType.Model);
+                            if (!twinParentTransform.Equals(Constants.NullTransform))
+                            {
+                                var twinParentNewPos = new Vector3(
+                                    twinParentTransform.Translation.X,
+                                    twinParentTransform.Translation.Y,
+                                    twinParentTransform.Translation.Z
+                                );
+                                
+                                // Calculate and set new position
+                                var twinNewPos = twinParentNewPos + twinNewOffset;
+                                twinTransform.Translation.X = twinNewPos.X;
+                                twinTransform.Translation.Y = twinNewPos.Y;
+                                twinTransform.Translation.Z = twinNewPos.Z;
+                            }
+                        }
+                    }
+                    
+                    // Apply twin model transform
+                    var twinSkelly = cBase->Skeleton->PartialSkeletons[twinBone.PartialSkeletonIndex];
+                    var twinPose = twinSkelly.GetHavokPose(Constants.TruePoseIndex);
+                    if (twinPose != null)
+                    {
+                        twinPose->ModelPose.Data[twinBone.BoneIndex] = twinTransform;
+                        Plugin.Logger.Verbose($"Applied scaling and moved mirror bone {twinBone.BoneName}");
+                        
+                        // Update local transform for non-root mirror bones
+                        if (twinBone.ParentBone != null)
+                        {
+                            var twinParentModel = twinBone.ParentBone.GetGameTransform(cBase, PoseType.Model);
+                            var twinLocalTransform = twinBone.GetGameTransform(cBase, PoseType.Local);
+                            if (!twinLocalTransform.Equals(Constants.NullTransform) && !twinParentModel.Equals(Constants.NullTransform))
+                            {
+                                // Calculate local offset from parent's world position
+                                var twinParentPos = new Vector3(
+                                    twinParentModel.Translation.X,
+                                    twinParentModel.Translation.Y,
+                                    twinParentModel.Translation.Z
+                                );
+                                var twinPos = new Vector3(
+                                    twinTransform.Translation.X,
+                                    twinTransform.Translation.Y,
+                                    twinTransform.Translation.Z
+                                );
+                                var twinWorldOffset = twinPos - twinParentPos;
+                                
+                                // Update local translation
+                                twinLocalTransform.Translation.X = twinWorldOffset.X;
+                                twinLocalTransform.Translation.Y = twinWorldOffset.Y;
+                                twinLocalTransform.Translation.Z = twinWorldOffset.Z;
+                                
+                                // Apply local transform
+                                twinPose->LocalPose.Data[twinBone.BoneIndex] = twinLocalTransform;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Force update of all poses
+        foreach (var partialIdx in Enumerable.Range(0, cBase->Skeleton->PartialSkeletonCount))
+        {
+            var pSkelly = cBase->Skeleton->PartialSkeletons[partialIdx];
+            var pose = pSkelly.GetHavokPose(Constants.TruePoseIndex);
+            if (pose != null)
+            {
+                pose->ModelInSync = 0;
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Gathers this bone and all descendant bones in hierarchy order
+    /// </summary>
+    private void GatherBoneHierarchy(List<ModelBone> boneList)
+    {
+        // Add self first
+        if (!boneList.Contains(this))
+        {
+            boneList.Add(this);
+            Plugin.Logger.Verbose($"Added bone {BoneName} to hierarchy");
+        }
+        
+        // Then add each child and their descendants
+        foreach (var child in ChildBones)
+        {
+            if (child != null && !boneList.Contains(child))
+            {
+                Plugin.Logger.Verbose($"Processing child {child.BoneName} of {BoneName}");
+                child.GatherBoneHierarchy(boneList);
+            }
+        }
+    }
 
     private void ApplyTransFunc(CharacterBase* cBase, Func<hkQsTransformf, hkQsTransformf> modTrans)
     {
@@ -284,7 +554,6 @@ public unsafe class ModelBone
             }
         }
     }
-
 
     /// <summary>
     /// Checks for a non-zero and non-identity (root) scale.

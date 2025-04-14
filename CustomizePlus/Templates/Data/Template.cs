@@ -31,6 +31,11 @@ public sealed class Template : ISavable
         => UniqueId.ToString()[..8];
 
     public Dictionary<string, BoneTransform> Bones { get; init; } = new();
+    
+    /// <summary>
+    /// Gets whether this template uses hierarchical scaling
+    /// </summary>
+    public bool IsHierarchicalScaling { get; internal set; }
 
     public Template()
     {
@@ -46,6 +51,8 @@ public sealed class Template : ISavable
             Bones[kvp.Key] = new BoneTransform();
             Bones[kvp.Key].UpdateToMatch(kvp.Value);
         }
+        
+        IsHierarchicalScaling = original.IsHierarchicalScaling;
     }
 
     public override string ToString()
@@ -65,7 +72,8 @@ public sealed class Template : ISavable
             ["ModifiedDate"] = ModifiedDate,
             ["Name"] = Name.Text,
             ["Bones"] = JObject.FromObject(Bones),
-            ["IsWriteProtected"] = IsWriteProtected
+            ["IsWriteProtected"] = IsWriteProtected,
+            ["IsHierarchicalScaling"] = IsHierarchicalScaling
         };
 
         return ret;
@@ -97,7 +105,8 @@ public sealed class Template : ISavable
             Name = new LowerString(obj["Name"]?.ToObject<string>()?.Trim() ?? throw new ArgumentNullException("Name")),
             ModifiedDate = obj["ModifiedDate"]?.ToObject<DateTimeOffset>() ?? creationDate,
             Bones = obj["Bones"]?.ToObject<Dictionary<string, BoneTransform>>() ?? throw new ArgumentNullException("Bones"),
-            IsWriteProtected = obj["IsWriteProtected"]?.ToObject<bool>() ?? false
+            IsWriteProtected = obj["IsWriteProtected"]?.ToObject<bool>() ?? false,
+            IsHierarchicalScaling = obj["IsHierarchicalScaling"]?.ToObject<bool>() ?? false
         };
         if (template.ModifiedDate < creationDate)
             template.ModifiedDate = creationDate;

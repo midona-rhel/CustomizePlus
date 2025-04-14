@@ -14,7 +14,8 @@ public enum BoneAttribute
     //hard-coding the backing values for legacy purposes
     Position = 0,
     Rotation = 1,
-    Scale = 2
+    Scale = 2,
+    HierarchicalScale = 3
 }
 
 [Serializable]
@@ -58,6 +59,13 @@ public class BoneTransform
         set => _scaling = ClampVector(value);
     }
 
+    private Vector3 _hierarchicalScaling = Vector3.One;
+    public Vector3 HierarchicalScaling
+    {
+        get => _hierarchicalScaling;
+        set => _hierarchicalScaling = ClampVector(value);
+    }
+
     [OnDeserialized]
     internal void OnDeserialized(StreamingContext context)
     {
@@ -65,13 +73,15 @@ public class BoneTransform
         _translation = ClampToDefaultLimits(_translation);
         _rotation = ClampAngles(_rotation);
         _scaling = ClampToDefaultLimits(_scaling);
+        _hierarchicalScaling = ClampToDefaultLimits(_hierarchicalScaling);
     }
 
     public bool IsEdited()
     {
         return !Translation.IsApproximately(Vector3.Zero, 0.00001f)
                || !Rotation.IsApproximately(Vector3.Zero, 0.1f)
-               || !Scaling.IsApproximately(Vector3.One, 0.00001f);
+               || !Scaling.IsApproximately(Vector3.One, 0.00001f)
+               || !HierarchicalScaling.IsApproximately(Vector3.One, 0.00001f);
     }
 
     public BoneTransform DeepCopy()
@@ -80,7 +90,8 @@ public class BoneTransform
         {
             Translation = Translation,
             Rotation = Rotation,
-            Scaling = Scaling
+            Scaling = Scaling,
+            HierarchicalScaling = HierarchicalScaling
         };
     }
 
@@ -94,9 +105,13 @@ public class BoneTransform
         {
             Rotation = newValue;
         }
-        else
+        else if (which == BoneAttribute.Scale)
         {
             Scaling = newValue;
+        }
+        else if (which == BoneAttribute.HierarchicalScale)
+        {
+            HierarchicalScaling = newValue;
         }
     }
 
@@ -105,6 +120,7 @@ public class BoneTransform
         Translation = newValues.Translation;
         Rotation = newValues.Rotation;
         Scaling = newValues.Scaling;
+        HierarchicalScaling = newValues.HierarchicalScaling;
     }
 
     /// <summary>

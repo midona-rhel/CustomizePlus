@@ -195,10 +195,24 @@ public class BoneEditorPanel
                     modeChanged = true;
                 }
 
+                ImGui.SameLine();
+                if (ImGui.RadioButton("Hierarchical Scale", _editingAttribute == BoneAttribute.HierarchicalScale))
+                {
+                    _editingAttribute = BoneAttribute.HierarchicalScale;
+                    modeChanged = true;
+                }
+                CtrlHelper.AddHoverText($"Scales this bone and all bones in its hierarchy, preserving the overall shape");
+
                 if (modeChanged)
                 {
                     _configuration.EditorConfiguration.EditorMode = _editingAttribute;
                     _configuration.Save();
+                    
+                    // If we're in editor mode and have a template, update its hierarchical scaling flag
+                    if (_editorManager.IsEditorActive && _editorManager.CurrentlyEditedTemplate != null)
+                    {
+                        _editorManager.CurrentlyEditedTemplate.IsHierarchicalScaling = _editingAttribute == BoneAttribute.HierarchicalScale;
+                    }
                 }
 
                 using (var disabled = ImRaii.Disabled(!_isUnlocked))
@@ -242,7 +256,7 @@ public class BoneEditorPanel
                 var col1Label = _editingAttribute == BoneAttribute.Rotation ? "Roll" : "X";
                 var col2Label = _editingAttribute == BoneAttribute.Rotation ? "Pitch" : "Y";
                 var col3Label = _editingAttribute == BoneAttribute.Rotation ? "Yaw" : "Z";
-                var col4Label = _editingAttribute == BoneAttribute.Scale ? "All" : "N/A";
+                var col4Label = (_editingAttribute == BoneAttribute.Scale || _editingAttribute == BoneAttribute.HierarchicalScale) ? "All" : "N/A";
 
                 ImGui.TableSetupColumn("Bones", ImGuiTableColumnFlags.NoReorder | ImGuiTableColumnFlags.WidthFixed, 3 * CtrlHelper.IconButtonWidth);
 
@@ -250,7 +264,7 @@ public class BoneEditorPanel
                 ImGui.TableSetupColumn($"{col2Label}", ImGuiTableColumnFlags.NoReorder | ImGuiTableColumnFlags.WidthStretch);
                 ImGui.TableSetupColumn($"{col3Label}", ImGuiTableColumnFlags.NoReorder | ImGuiTableColumnFlags.WidthStretch);
                 ImGui.TableSetupColumn($"{col4Label}", ImGuiTableColumnFlags.NoReorder | ImGuiTableColumnFlags.WidthStretch);
-                ImGui.TableSetColumnEnabled(4, _editingAttribute == BoneAttribute.Scale);
+                ImGui.TableSetColumnEnabled(4, _editingAttribute == BoneAttribute.Scale || _editingAttribute == BoneAttribute.HierarchicalScale);
 
                 ImGui.TableSetupColumn("Name", ImGuiTableColumnFlags.NoReorder | ImGuiTableColumnFlags.WidthStretch);
 
@@ -457,6 +471,8 @@ public class BoneEditorPanel
         {
             BoneAttribute.Position => transform.Translation,
             BoneAttribute.Rotation => transform.Rotation,
+            BoneAttribute.Scale => transform.Scaling,
+            BoneAttribute.HierarchicalScale => transform.HierarchicalScaling,
             _ => transform.Scaling
         };
 
@@ -484,14 +500,14 @@ public class BoneEditorPanel
             flagUpdate |= SingleValueSlider($"##{displayName}-Z", ref newVector.Z);
 
             //----------------------------------
-            if (_editingAttribute != BoneAttribute.Scale)
+            if (_editingAttribute != BoneAttribute.Scale && _editingAttribute != BoneAttribute.HierarchicalScale)
                 ImGui.BeginDisabled();
 
             ImGui.TableNextColumn();
             var tempVec = new Vector3(newVector.X, newVector.Y, newVector.Z);
             flagUpdate |= FullBoneSlider($"##{displayName}-All", ref newVector);
 
-            if (_editingAttribute != BoneAttribute.Scale)
+            if (_editingAttribute != BoneAttribute.Scale && _editingAttribute != BoneAttribute.HierarchicalScale)
                 ImGui.EndDisabled();
         }
 
@@ -518,6 +534,13 @@ public class BoneEditorPanel
             transform.UpdateAttribute(_editingAttribute, newVector);
 
             _editorManager.ModifyBoneTransform(codename, transform);
+            
+            // Update template to mark it as using hierarchical scaling if needed
+            if (_editingAttribute == BoneAttribute.HierarchicalScale && _editorManager.CurrentlyEditedTemplate != null)
+            {
+                _editorManager.CurrentlyEditedTemplate.IsHierarchicalScaling = true;
+            }
+            
             if (_isMirrorModeEnabled && bone.Basis?.TwinBone != null) //todo: put it inside manager
                 _editorManager.ModifyBoneTransform(bone.Basis.TwinBone.BoneName,
                     BoneData.IsIVCSCompatibleBone(codename) ? transform.GetSpecialReflection() : transform.GetStandardReflection());

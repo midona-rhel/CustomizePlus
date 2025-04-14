@@ -325,6 +325,34 @@ public unsafe sealed class ArmatureManager : IDisposable
                     }
                 }
             }
+            
+            // Apply hierarchical scaling after all regular transforms are applied
+            for (var pSkeleIndex = 0; pSkeleIndex < cBase->Skeleton->PartialSkeletonCount; ++pSkeleIndex)
+            {
+                var currentPose = cBase->Skeleton->PartialSkeletons[pSkeleIndex].GetHavokPose(Constants.TruePoseIndex);
+                
+                if (currentPose != null)
+                {
+                    for (var boneIndex = 0; boneIndex < currentPose->Skeleton->Bones.Length; ++boneIndex)
+                    {
+                        if (armature.GetBoneAt(pSkeleIndex, boneIndex) is ModelBone mb
+                            && mb != null
+                            && mb.BoneName == currentPose->Skeleton->Bones[boneIndex].Name.String)
+                        {
+                            // If this is not the root bone and we're in hierarchical scaling mode
+                            if (mb != armature.MainRootBone && mb.IsActive && mb.CustomizedTransform != null)
+                            {
+                                // If bone is part of a template that uses hierarchical scaling
+                                if (armature.BoneTemplateBinding.TryGetValue(mb.BoneName, out var template) && 
+                                    template.IsHierarchicalScaling)
+                                {
+                                    mb.ApplyHierarchicalModelScale(cBase);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
